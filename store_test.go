@@ -3,20 +3,29 @@ package panopticon
 import (
 	"context"
 	"io/ioutil"
-	"os"
 	"testing"
 
+	"cryptoscope.co/go/binpath"
 	"cryptoscope.co/go/voyeur"
+
 	"github.com/dgraph-io/badger"
 )
+
+type TestEvent struct {
+	NewMessageEvent
+	
+	// whether or not message should pass filter
+	Pass bool
+}
 
 func TestStore(t *testing.T) {
 	tmpdir, err := ioutil.TempDir("/tmp/", "go_test-ssb_nt")
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Log("temp dir:", tmpdir)
+	//defer os.RemoveAll(tmpdir)
 
-	defer os.RemoveAll(tmpdir)
 	opts := badger.DefaultOptions
 	opts.Dir = tmpdir
 	opts.ValueDir = tmpdir
@@ -26,38 +35,60 @@ func TestStore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := NewStore(
-		db,
-		voyeur.Map(func(ctx context.Context, em voyeur.Emitter, e voyeur.Event) {}))
+	root := NewStore(db, voyeur.Fwd)
 
-	filterStore := NewStore(
-		db,
-		voyeur.Map(func(ctx context.Context, em voyeur.Emitter, e voyeur.Event) {
-			em.Emit(ctx, e)
-		}))
+	_, err = root.MkSubStore("filter", func(ctx context.Context, s *Store, em voyeur.Emitter, e voyeur.Event) {
+		t.Logf("filterStore got event of type %T", e)
+		if ev, ok := e.(TestEvent); ok && ev.Pass {
+			t.Logf("filterStore accepted event %#v", e)
 
-	s.PutStore(
-		"msg",
-		NewStore(
-			db,
-			voyeur.Map(func(ctx context.Context, em voyeur.Emitter, e voyeur.Event) {
-				filterStore.OnEvent(ctx, e)
-			})))
+			ev.Path = binpath.FromBytes(ev.Key)
+			
+			err := s.Put(ev.Path, ev.Value)
+			if err != nil {
+				t.Log(err)
+				t.Fail()
+				return
+			}
+			
+			em.Emit(ctx, ev)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	s.PutStore("filters", filterStore)
-
-	filterStore.PutStore(
-		"startsWithZero",
-		NewStore(
-			db,
-			voyeur.Map(func(ctx context.Context, em voyeur.Emitter, e voyeur.Event) {
-				pe, ok := e.(PutEvent)
-				if !ok {
-					return
-				}
-
-				if len(pe.Value) > 0 && pe.Value[0] == 0 {
-					em.Emit(ctx, e)
-				}
-			})))
+	root.OnEvent(context.Background(), TestEvent{
+		NewMessageEvent: NewMessageEvent{
+			Key:[]byte("foo"),
+			Value:[]byte("bar"),
+		},
+		Pass: false,
+	})
+	
+	root.OnEvent(context.Background(), TestEvent{
+		NewMessageEvent: NewMessageEvent{
+			Key:[]byte("testkey"),
+			Value:[]byte("testvalue"),
+		},
+		Pass: true,
+	})
+	
+	var n int
+	
+	err = root.db.View(func (txn *badger.Txn) error {
+		it := txn.NewIterator(badger.IteratorOptions{})
+		for it.Rewind(); it.Valid(); it.Next() {
+			n++
+		}
+		return nil
+	})
+	
+	if err != nil {
+		t.Fatal(err)
+	}
+	
+	if n != 1 {
+		t.Fatalf("expected 1 record, got %d", n)
+	}
 }

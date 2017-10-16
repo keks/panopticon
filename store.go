@@ -64,19 +64,25 @@ func (s *Store) GetStore(path binpath.Path) *Store {
 	return cur
 }
 
-func (s *Store) PutStore(rel string, sub *Store) error {
+func (s *Store) MkSubStore(rel string, filterFunc func(context.Context, *Store, voyeur.Emitter, voyeur.Event)) (*Store, error) {
 	relPath, err := binpath.FromString(rel)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	sub.prefix = binpath.Join(sub.prefix, relPath)
+	
+	sub := &Store{
+		prefix: binpath.Join(s.prefix, relPath),
+		db: s.db,
+		subs: make(map[string]*Store),
+	}
+	sub.Filter = BuildFilter(sub, filterFunc)
 
 	s.Register(context.Background(), sub)
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	s.subs[rel] = sub
 
-	return nil
+	return sub, nil
 }
 
 func (s *Store) Get(path binpath.Path) (data []byte, err error) {

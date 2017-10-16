@@ -12,6 +12,10 @@ import (
 	"github.com/dgraph-io/badger"
 )
 
+func Fwd(ctx context.Context, s *Store, em voyeur.Emitter, e voyeur.Event) {
+	em.Emit(ctx, e)
+}
+
 type NewMessageEvent struct {
 	Key   []byte
 	Path  binpath.Path
@@ -23,7 +27,13 @@ func (e NewMessageEvent) EventType() string {
 	return "NewMessageEvent"
 }
 
-type FilterSpec map[string]voyeur.Filter
+func BuildFilter(s *Store, f func(context.Context, *Store, voyeur.Emitter, voyeur.Event)) voyeur.Filter {
+	return voyeur.Map(func (ctx context.Context, em voyeur.Emitter, e voyeur.Event) {
+		f(ctx, s, em, e)
+	})
+}
+
+type FilterSpec map[string]func(context.Context, *Store, voyeur.Emitter, voyeur.Event)
 
 func (s FilterSpec) Sorted() []string {
 	paths := make([]string, 0, len(s))
@@ -49,15 +59,13 @@ func NewDB(bdg *badger.DB, spec FilterSpec) (*DB, error) {
 		spec: spec,
 	}
 
-	filters := NewStore(bdg, voyeur.Fwd)
-
-	err := db.s.PutStore("filters", filters)
+	filters, err := db.s.MkSubStore("filters", Fwd)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, path := range spec.Sorted() {
-		err := filters.PutStore(path, NewStore(bdg, spec[path]))
+		_, err := filters.MkSubStore(path, spec[path])
 		if err != nil {
 			return nil, err
 		}
